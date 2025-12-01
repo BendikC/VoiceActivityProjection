@@ -131,6 +131,134 @@ def step_extraction(
     return out
 
 
+def load_vap_model(state_dict_path=None, checkpoint_path=None, conf=None, device=None):
+    """
+    Load VAP model from state dict or checkpoint.
+    
+    Args:
+        state_dict_path: Path to state dict file
+        checkpoint_path: Path to Lightning checkpoint (not implemented)
+        conf: VapConfig object (required if using state_dict_path)
+        device: Device to load model on ('cpu', 'cuda', or None for auto-detect)
+    
+    Returns:
+        tuple: (model, device)
+    """
+    if checkpoint_path is not None:
+        from vap.train import VAPModel
+        print("From Lightning checkpoint: ", checkpoint_path)
+        raise NotImplementedError("Not implemented from checkpoint...")
+    elif state_dict_path is not None:
+        print("From state-dict: ", state_dict_path)
+        model = VapGPT(conf)
+        sd = torch.load(state_dict_path)
+        model.load_state_dict(sd)
+    else:
+        raise ValueError("Must provide either state_dict_path or checkpoint_path")
+    
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    model = model.to(device)
+    model = model.eval()
+    
+    return model, device
+
+
+def process_audio(
+    audio_path,
+    model,
+    device="cpu",
+    chunk=False,
+    chunk_time=30,
+    step_time=5,
+    output_path=None,
+    plot=False,
+    verbose=True
+):
+    """
+    Process a single audio file with VAP model.
+    
+    Args:
+        audio_path: Path to audio file
+        model: VAP model
+        device: Device to run inference on
+        chunk: Whether to process in chunks
+        chunk_time: Duration of each chunk
+        step_time: Step size for chunked processing
+        output_path: Path to save JSON output (optional)
+        plot: Whether to generate and save plot
+        verbose: Whether to print progress
+        downsample_hz: Target sample rate for output (e.g., 100 for 100 samples/sec)
+    
+    Returns:
+        dict: Model output containing 'vad', 'p_now', 'p_future', 'probs', 'H'
+    """
+    # Load audio
+    waveform, _ = load_waveform(audio_path, sample_rate=model.sample_rate)
+    duration = round(waveform.shape[-1] / model.sample_rate)
+    
+    if waveform.shape[0] == 1:
+        waveform = torch.cat((waveform, torch.zeros_like(waveform)))
+    waveform = waveform.unsqueeze(0)
+    
+    # Check if chunking is needed
+    if duration > 160 and not chunk:
+        if verbose:
+            print(f"WARNING: Audio duration {duration}s > 160s, enabling chunking")
+        chunk = True
+    
+    # Model forward
+    if chunk:
+        out = step_extraction(
+            waveform, 
+            model, 
+            device, 
+            context_time=chunk_time - step_time,
+            step_time=step_time,
+            pbar=True  # Force pbar=True
+        )
+    else:
+        waveform = waveform.to(device)
+        out = model.probs(waveform)
+        out = batch_to_device(out, "cpu")
+    
+    
+    # Print shapes
+    if verbose:
+        for k, v in out.items():
+            if isinstance(v, torch.Tensor):
+                print(f"{k}: ", tuple(v.shape))
+    
+    # Save output
+    if output_path is not None:
+        if not output_path.endswith(".json"):
+            output_path += ".json"
+        
+        # Save everything except the large 'probs' tensor
+        data_to_save = {k: v for k, v in out.items() if k != 'probs'}
+        data = tensor_dict_to_json(data_to_save)
+        write_json(data, output_path)
+        if verbose:
+            print("Saved output -> ", output_path)
+    
+    # Plot
+    if plot:
+        vad = out["vad"][0].cpu()
+        p_ns = out["p_now"][0, :, 0].cpu()
+        fig, ax = plot_stereo(
+            waveform[0].cpu(), p_ns, vad, plot=False, figsize=(100, 6)
+        )
+        
+        figpath = output_path.replace(".json", ".png") if output_path else "output.png"
+        fig.savefig(figpath)
+        if verbose:
+            print(f"Saved figure as {figpath}")
+        plt.close(fig)
+    
+    return out
+
+
 def get_args():
     parser = ArgumentParser()
     parser.add_argument(
@@ -190,90 +318,30 @@ def get_args():
 if __name__ == "__main__":
     args, conf = get_args()
 
-    ###########################################################
     # Load the model
-    ###########################################################
     print("Load Model...")
-    if args.checkpoint is None:
-        print("From state-dict: ", args.state_dict)
-        model = VapGPT(conf)
-        sd = torch.load(args.state_dict)
-        model.load_state_dict(sd)
-    else:
-        from vap.train import VAPModel
+    model, device = load_vap_model(
+        state_dict_path=args.state_dict,
+        checkpoint_path=args.checkpoint,
+        conf=conf
+    )
 
-        print("From Lightning checkpoint: ", args.checkpoint)
-        raise NotImplementedError("Not implemeted from checkpoint...")
-        # model = VAPModel.load_from_checkpoint(args.checkpoint)
-    device = "cpu"
-    if torch.cuda.is_available():
-        model = model.to("cuda")
-        device = "cuda"
-    model = model.eval()
-
-    ###########################################################
-    # Load the Audio
-    ###########################################################
-    waveform, _ = load_waveform(args.audio, sample_rate=model.sample_rate)
-    duration = round(waveform.shape[-1] / model.sample_rate)
-    if waveform.shape[0] == 1:
-        waveform = torch.cat((waveform, torch.zeros_like(waveform)))
-    waveform = waveform.unsqueeze(0)
-
-    # Maximum known duration with a 24Gb 'NVIDIA GeForce RTX 3090' is 164s
-    if duration > 160:
-        print(
-            f"WARNING: Can't fit {duration} > 160s on 24Gb 'NVIDIA GeForce RTX 3090' GPU"
-        )
-        print("WARNING: Change code if this is not what you want.")
-        args.chunk = True
-
-    ###########################################################
-    # Model Forward
-    ###########################################################
-    if args.chunk:
-        # raise NotImplementedError("step extraction not implemented")
-        out = step_extraction(waveform, model, device)
-    else:
-        if torch.cuda.is_available():
-            waveform = waveform.to("cuda")
-        out = model.probs(waveform)
-        out = batch_to_device(out, "cpu")  # to cpu for plot/save
-
-    ###########################################################
-    # Print shapes
-    ###########################################################
-    for k, v in out.items():
-        if isinstance(v, torch.Tensor):
-            print(f"{k}: ", tuple(v.shape))
-
-    ###########################################################
-    # Save Output
-    ###########################################################
+    # Generate output filename if not provided
     if args.filename is None:
         args.filename = basename(args.audio).replace(".wav", ".json")
 
-    if not args.filename.endswith(".json"):
-        args.filename += ".json"
-
-    data = tensor_dict_to_json(out)
-    write_json(data, args.filename)
+    # Process audio
+    out = process_audio(
+        audio_path=args.audio,
+        model=model,
+        device=device,
+        chunk=args.chunk,
+        chunk_time=args.chunk_time,
+        step_time=args.step_time,
+        output_path=args.filename,
+        plot=args.plot,
+        verbose=True,
+        downsample_hz=100
+    )
+    
     print("wavefile: ", args.audio)
-    print("Saved output -> ", args.filename)
-
-    ###########################################################
-    # Plot
-    ###########################################################
-    if args.plot:
-        print(out.keys())
-        vad = out["vad"][0].cpu()
-        p_ns = out["p_now"][0, :, 0].cpu()
-        fig, ax = plot_stereo(
-            waveform[0].cpu(), p_ns, vad, plot=False, figsize=(100, 6)
-        )
-        # Save figure
-        figpath = args.filename.replace(".json", ".png")
-        fig.savefig(figpath)
-        print(f"Saved figure as {figpath}.png")
-        print("Close figure to continue")
-        plt.show()
