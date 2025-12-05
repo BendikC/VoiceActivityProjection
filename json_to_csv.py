@@ -4,7 +4,7 @@ Convert VAP JSON output to CSV with turn-taking analysis.
 Usage:
     python json_to_csv.py -j output.json -o turns.csv
     python json_to_csv.py -j output.json -o turns.csv --threshold 0.6
-    python json_to_csv.py -j output.json -o turns.csv --vad-threshold 0.5
+    python json_to_csv.py -j output.json -o turns.csv
 """
 
 import torch
@@ -33,21 +33,18 @@ def load_vap_output(json_path: str):
 
 def extract_turns(
     p_now: np.ndarray,
-    vad: np.ndarray,
     frame_hz: int = 50,
     threshold: float = 0.5,
-    vad_threshold: float = 0.5,
-    min_turn_duration: float = 0.3
+    min_turn_duration: float = 0.07,
+    hysteresis: float = 0.1
 ):
     """
     Extract turn-taking events from predictions.
     
     Args:
         p_now: Next speaker probabilities (n_frames,)
-        vad: Voice activity detection (n_frames, 2)
         frame_hz: Frame rate
         threshold: Threshold for p_now (0.5 = equal probability)
-        vad_threshold: Threshold for VAD detection
         min_turn_duration: Minimum turn duration in seconds
         
     Returns:
@@ -55,23 +52,44 @@ def extract_turns(
     """
     # Convert frame indices to time
     times = np.arange(len(p_now)) / frame_hz
+    confidence = np.abs(p_now - 0.5) * 2
+
+    # State machine with hysteresis
+    current_speaker = 'A' if p_now[0] > threshold else 'B'
+    speaker_sequence = []
+
+    for prob in p_now:
+        if current_speaker == 'A':
+            # Need to drop below lower threshold to switch to B
+            if prob < (threshold - hysteresis):
+                current_speaker = 'B'
+        else:  # current_speaker == 'B'
+            # Need to rise above upper threshold to switch to A
+            if prob > (threshold + hysteresis):
+                current_speaker = 'A'
+        
+        speaker_sequence.append(current_speaker)
     
+    speaker_sequence = np.array(speaker_sequence)
     
-    predicted_speaker_numeric = (p_now > threshold).astype(int)  # 1 = A, 0 = B
-    predicted_speaker = np.where(p_now > threshold, 'A', 'B')
+    predicted_speaker_numeric = (speaker_sequence == 'A').astype(int)  # 1 = A, 0 = B
+    predicted_speaker = speaker_sequence
     turn_changes = np.where(np.diff(predicted_speaker_numeric) != 0)[0] + 1
     
     turns = []
     
     # Add initial state
     if len(predicted_speaker) > 0:
+        initial_end_idx = turn_changes[0] if len(turn_changes) > 0 else len(times)
+        initial_conf = np.mean(confidence[0:initial_end_idx])       
+
         turns.append({
             'turn_id': 0,
             'start_time': 0.0,
             'end_time': times[turn_changes[0]] if len(turn_changes) > 0 else times[-1],
             'duration': (times[turn_changes[0]] if len(turn_changes) > 0 else times[-1]) - 0.0,
             'predicted_speaker': predicted_speaker[0],
-            'confidence': abs(p_now[0] - 0.5) * 2
+            'confidence': initial_conf
         })
     
     # Process each turn change
@@ -87,10 +105,7 @@ def extract_turns(
         if duration < min_turn_duration:
             continue
         
-        # Get average confidence during this turn
-        segment_probs = p_now[start_idx:end_idx]
-        avg_confidence = np.mean(np.abs(segment_probs - 0.5))
-        
+        segment_conf = np.mean(confidence[start_idx:end_idx])
         
         turns.append({
             'turn_id': len(turns),
@@ -98,7 +113,7 @@ def extract_turns(
             'end_time': end_time,
             'duration': duration,
             'predicted_speaker': predicted_speaker[start_idx],
-            'confidence': avg_confidence * 2
+            'confidence': segment_conf
         })
     
     return pd.DataFrame(turns)
@@ -106,20 +121,16 @@ def extract_turns(
 
 def create_frame_level_csv(
     p_now: np.ndarray,
-    vad: np.ndarray,
     frame_hz: int = 50,
-    threshold: float = 0.5,
-    vad_threshold: float = 0.5
+    threshold: float = 0.5
 ):
     """
     Create frame-by-frame CSV with all information.
     
     Args:
         p_now: Next speaker probabilities
-        vad: Voice activity detection
         frame_hz: Frame rate
         threshold: Threshold for predictions
-        vad_threshold: Threshold for VAD
         
     Returns:
         DataFrame with frame-level information
@@ -132,11 +143,7 @@ def create_frame_level_csv(
         'p_speaker_a': p_now,  # Probability Speaker A is next
         'p_speaker_b': 1 - p_now,  # Probability Speaker B is next
         'predicted_speaker': np.where(p_now > threshold, 'A', 'B'),
-        'confidence': np.abs(p_now - 0.5),  # Distance from 0.5
-        'vad_speaker_a': vad[:, 0],
-        'vad_speaker_b': vad[:, 1],
-        'speaker_a_active': vad[:, 0] > vad_threshold,
-        'speaker_b_active': vad[:, 1] > vad_threshold,
+        'confidence': np.abs(p_now - 0.5)  # Distance from 0.5
     })
     
     # Add turn-taking interpretation
@@ -152,8 +159,8 @@ def json_to_csv(
     output_path: str,
     frame_hz: int = 50,
     threshold: float = 0.5,
-    vad_threshold: float = 0.5,
-    min_turn_duration: float = 0.3,
+    min_turn_duration: float = 0.07,
+    hysteresis: float = 0.1,
     output_format: str = 'turns'
 ):
     """
@@ -164,7 +171,6 @@ def json_to_csv(
         output_path: Path to save CSV file
         frame_hz: Frame rate of predictions
         threshold: Threshold for turn predictions (default 0.5)
-        vad_threshold: Threshold for VAD detection (default 0.5)
         min_turn_duration: Minimum turn duration in seconds
         output_format: 'turns' or 'frames'
     """
@@ -173,21 +179,18 @@ def json_to_csv(
     
     # Extract data
     p_now = output['p_now'][0, :, 0].cpu().numpy()
-    vad = output['vad'][0].cpu().numpy()
     
     print(f"Data loaded - {len(p_now)} frames ({len(p_now)/frame_hz:.1f}s)")
     print(f"Using threshold: {threshold} (>= {threshold} = Speaker A, < {threshold} = Speaker B)")
-    print(f"Using VAD threshold: {vad_threshold}")
     
     if output_format == 'turns':
         # Create turn-level CSV
         df = extract_turns(
             p_now=p_now,
-            vad=vad,
             frame_hz=frame_hz,
             threshold=threshold,
-            vad_threshold=vad_threshold,
-            min_turn_duration=min_turn_duration
+            min_turn_duration=min_turn_duration,
+            hysteresis=hysteresis
         )
         
         print(f"\nExtracted {len(df)} turns")
@@ -198,10 +201,8 @@ def json_to_csv(
         # Create frame-level CSV
         df = create_frame_level_csv(
             p_now=p_now,
-            vad=vad,
             frame_hz=frame_hz,
-            threshold=threshold,
-            vad_threshold=vad_threshold
+            threshold=threshold
         )
         
         print(f"\nCreated frame-by-frame data: {len(df)} frames")
@@ -251,16 +252,16 @@ def get_args():
         help="Threshold for turn predictions (default: 0.5). Values >= threshold = Speaker A, < threshold = Speaker B"
     )
     parser.add_argument(
-        "--vad-threshold",
+        "--hysteresis",
         type=float,
-        default=0.5,
-        help="Threshold for VAD detection (default: 0.5)"
+        default=0.1,
+        help="Hysteresis margin to prevent rapid switching (default: 0.1). Higher = more conservative"
     )
     parser.add_argument(
         "--min-duration",
         type=float,
-        default=0.3,
-        help="Minimum turn duration in seconds (default: 0.3)"
+        default=0.07,
+        help="Minimum turn duration in seconds (default: 0.07)"
     )
     parser.add_argument(
         "--format",
@@ -287,7 +288,7 @@ if __name__ == "__main__":
         output_path=args.output,
         frame_hz=args.frame_hz,
         threshold=args.threshold,
-        vad_threshold=args.vad_threshold,
         min_turn_duration=args.min_duration,
-        output_format=args.format
+        output_format=args.format,
+        hysteresis=args.hysteresis
     )

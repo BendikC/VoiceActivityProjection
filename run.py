@@ -235,8 +235,7 @@ def process_audio(
         if not output_path.endswith(".json"):
             output_path += ".json"
         
-        # Save everything except the large 'probs' tensor
-        data_to_save = {k: v for k, v in out.items() if k != 'probs'}
+        data_to_save = {k: v for k, v in out.items()}
         data = tensor_dict_to_json(data_to_save)
         write_json(data, output_path)
         if verbose:
