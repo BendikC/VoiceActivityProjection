@@ -134,33 +134,111 @@ def step_extraction(
 def load_vap_model(state_dict_path=None, checkpoint_path=None, conf=None, device=None):
     """
     Load VAP model from state dict or checkpoint.
+    Handles both:
+    - Official pretrained .pt files (pure state_dict)
+    - Lightning .ckpt files (contains 'state_dict' key)
     
     Args:
-        state_dict_path: Path to state dict file
-        checkpoint_path: Path to Lightning checkpoint (not implemented)
-        conf: VapConfig object (required if using state_dict_path)
+        state_dict_path: Path to state dict file (.pt or .ckpt)
+        checkpoint_path: Path to Lightning checkpoint (deprecated, use state_dict_path)
+        conf: VapConfig object (required)
         device: Device to load model on ('cpu', 'cuda', or None for auto-detect)
     
     Returns:
         tuple: (model, device)
     """
     if checkpoint_path is not None:
-        from vap.train import VAPModel
-        print("From Lightning checkpoint: ", checkpoint_path)
-        raise NotImplementedError("Not implemented from checkpoint...")
-    elif state_dict_path is not None:
-        print("From state-dict: ", state_dict_path)
-        model = VapGPT(conf)
-        sd = torch.load(state_dict_path)
-        model.load_state_dict(sd)
-    else:
-        raise ValueError("Must provide either state_dict_path or checkpoint_path")
+        print("WARNING: checkpoint_path is deprecated, use state_dict_path instead")
+        state_dict_path = checkpoint_path
     
+    if state_dict_path is None:
+        raise ValueError("Must provide state_dict_path")
+    
+    print("From state-dict: ", state_dict_path)
+    
+    # Register OptConfig in case checkpoint references it
+    try:
+        from vap.train_config import OptConfig
+        import sys
+        sys.modules['__main__'].OptConfig = OptConfig
+    except ImportError:
+        # If train_config doesn't exist, create a dummy class
+        from dataclasses import dataclass
+        
+        @dataclass
+        class OptConfig:
+            learning_rate: float = 3.63e-4
+            find_learning_rate: bool = False
+            betas = [0.9, 0.999]
+            weight_decay: float = 0.001
+            lr_scheduler_interval: str = "step"
+            lr_scheduler_freq: int = 100
+            lr_scheduler_tmax: int = 2500
+            lr_scheduler_patience: int = 2
+            lr_scheduler_factor: float = 0.5
+            early_stopping: bool = True
+            patience: int = 10
+            monitor: str = "val_loss"
+            mode: str = "min"
+        
+        import sys
+        sys.modules['__main__'].OptConfig = OptConfig
+    
+    # Load checkpoint with proper settings
+    ckpt = torch.load(
+        state_dict_path, 
+        map_location="cpu",  # Always load to CPU first
+        weights_only=False    # Allow loading Lightning checkpoints
+    )
+    
+    # Handle different checkpoint formats
+    if isinstance(ckpt, dict) and "state_dict" in ckpt:
+        # Lightning checkpoint format
+        print("Detected Lightning checkpoint, extracting 'state_dict'")
+        sd = ckpt["state_dict"]
+    else:
+        # Pure state_dict format (official pretrained models)
+        sd = ckpt
+    
+    # Clean up state dict keys
+    new_sd = {}
+    for k, v in sd.items():
+        # Remove "model." prefix if present (from Lightning)
+        if k.startswith("model."):
+            k = k[len("model."):]
+        
+        # Skip zero_shot parameters (used in training, not inference)
+        if k.startswith("zero_shot."):
+            continue
+        
+        new_sd[k] = v
+    
+    # Load model
+    model = VapGPT(conf)
+    
+    # Load with strict=False to handle missing/unexpected keys gracefully
+    missing, unexpected = model.load_state_dict(new_sd, strict=False)
+    
+    if len(missing) > 0:
+        print(f"Warning: {len(missing)} missing keys in state_dict")
+        if len(missing) < 10:  # Only print if not too many
+            for k in missing:
+                print(f"  - {k}")
+    
+    if len(unexpected) > 0:
+        print(f"Warning: {len(unexpected)} unexpected keys in state_dict")
+        if len(unexpected) < 10:
+            for k in unexpected:
+                print(f"  - {k}")
+    
+    # Move to device
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     
     model = model.to(device)
     model = model.eval()
+    
+    print(f"Model loaded on {device}")
     
     return model, device
 

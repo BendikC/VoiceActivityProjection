@@ -20,7 +20,11 @@ def read_ground_truth_csv(gt_csv_path: str, speaker_1: str, speaker_2: str, task
 
     # first have to filter the csv for the correct speaker, task, level, pair
     df = pd.read_csv(gt_csv_path)
-    df = df[(df['speaker'] == speaker_1) | (df['speaker'] == speaker_2) & (df['task'] == task) & (df['level'] == level)]
+    # Filter for correct task and level first
+    df = df[(df['task'] == task) & (df['level'] == level)]
+    
+    # Then filter for either speaker
+    df = df[(df['speaker'] == speaker_1) | (df['speaker'] == speaker_2)]
     gt_turns = {}
     for _, row in df.iterrows():
         start = row['start_time']
