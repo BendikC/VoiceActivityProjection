@@ -229,6 +229,44 @@ def align_sequences(probs1: torch.Tensor, probs2: torch.Tensor):
     return probs1_aligned, probs2_aligned
 
 
+def swap_speaker_channels(probs: torch.Tensor) -> torch.Tensor:
+    """
+    Swap speaker perspective in VAP probability distributions.
+    
+    The 256 classes encode 8 binary bins: [speaker_0_bins, speaker_1_bins]
+    where each speaker has 4 bins for future time windows.
+    
+    To swap perspectives, we need to reorder the codebook so that
+    what was "me" becomes "other" and vice versa.
+    
+    Args:
+        probs: (frames, 256) - probability distribution over 256 classes
+    
+    Returns:
+        probs_swapped: (frames, 256) - distribution with swapped perspective
+    """
+    device = probs.device
+    
+    # Create the index mapping for swapped classes
+    # Each class is an 8-bit binary number: [sp0_b0, sp0_b1, sp0_b2, sp0_b3, sp1_b0, sp1_b1, sp1_b2, sp1_b3]
+    # We want to swap the first 4 bits with the last 4 bits
+    
+    swap_indices = torch.zeros(256, dtype=torch.long, device=device)
+    for i in range(256):
+        # Extract the two 4-bit halves
+        speaker_0_bits = (i >> 0) & 0b1111  # bits 0-3
+        speaker_1_bits = (i >> 4) & 0b1111  # bits 4-7
+        
+        # Swap them
+        swapped_idx = (speaker_0_bits << 4) | speaker_1_bits
+        swap_indices[i] = swapped_idx
+    
+    # Reorder probabilities according to the swap mapping
+    probs_swapped = probs[..., swap_indices]
+    
+    return probs_swapped
+
+
 def compute_pair_divergence(
     file1: Path,
     file2: Path,
@@ -236,47 +274,39 @@ def compute_pair_divergence(
     frame_hz: int = 50
 ) -> Dict:
     """
-    Compute JS divergence between a conversational pair.
-    
-    Args:
-        file1: Path to first JSON file
-        file2: Path to second JSON file
-        metadata: Shared metadata (pair, task, delay)
-        frame_hz: Frame rate
-        
-    Returns:
-        dict: Results including JS divergence array and statistics
+    Compute JS divergence between conversational pair with proper perspective alignment.
     """
     # Load both conversations
     out1 = load_vap_output(str(file1))
     out2 = load_vap_output(str(file2))
     
     # Extract probability distributions
-    probs1 = out1['probs']  # (batch, frames, 256)
-    probs2 = out2['probs']
+    probs1 = out1['probs'][0]  # (frames, 256) - Speaker 1's perspective
+    probs2 = out2['probs'][0]  # (frames, 256) - Speaker 2's perspective
+    
+    # Convert Speaker 2's perspective to Speaker 1's reference frame
+    # This swaps "me vs other" to align perspectives
+    probs2_swapped = swap_speaker_channels(probs2)
     
     # Align sequences
-    probs1, probs2 = align_sequences(probs1, probs2)
-    n_frames = probs1.shape[1]
+    min_frames = min(probs1.shape[0], probs2_swapped.shape[0])
+    probs1 = probs1[:min_frames]
+    probs2_swapped = probs2_swapped[:min_frames]
     
-    # Remove batch dimension
-    probs1 = probs1[0]  # (frames, 256)
-    probs2 = probs2[0]
-    
-    # Compute JS divergence per frame
-    js = compute_js_divergence(probs1, probs2)
+    # Compute JS divergence - now comparing aligned perspectives
+    js = compute_js_divergence(probs1, probs2_swapped)
     
     # Convert to numpy for JSON serialization
     js_array = js.cpu().numpy().tolist()
-    times = (np.arange(n_frames) / frame_hz).tolist()
+    times = (np.arange(min_frames) / frame_hz).tolist()
     
     # Compute statistics
     result = {
         'metadata': metadata,
         'file1': file1.name,
         'file2': file2.name,
-        'n_frames': n_frames,
-        'duration_seconds': n_frames / frame_hz,
+        'n_frames': min_frames,
+        'duration_seconds': min_frames / frame_hz,
         'frame_hz': frame_hz,
         'js_divergence': {
             'values': js_array,
