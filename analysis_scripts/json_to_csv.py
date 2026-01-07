@@ -1,15 +1,5 @@
 """
-Convert VAP JSON output to CSV with turn-taking analysis.
-
-Usage:
-    # Single file
-    python json_to_csv.py -j output.json -o turns.csv
-    
-    # Entire folder
-    python json_to_csv.py -j outputs/ -o csv_outputs/
-    
-    # With custom parameters
-    python json_to_csv.py -j outputs/ -o csv_outputs/ --threshold 0.6 --hysteresis 0.15
+Convert VAP JSON output to a CSV file with turns on frame-level per speaker.
 """
 
 import torch
@@ -45,17 +35,7 @@ def extract_turns(
     hysteresis: float = 0.1
 ):
     """
-    Extract turn-taking events from predictions.
-    
-    Args:
-        p_now: Next speaker probabilities (n_frames,)
-        frame_hz: Frame rate
-        threshold: Threshold for p_now (0.5 = equal probability)
-        min_turn_duration: Minimum turn duration in seconds
-        hysteresis: Hysteresis margin to prevent rapid switching
-        
-    Returns:
-        DataFrame with turn information
+    Extracts the turn-taking events from VAP predictions.
     """
     # Convert frame indices to time
     times = np.arange(len(p_now)) / frame_hz
@@ -126,41 +106,6 @@ def extract_turns(
     return pd.DataFrame(turns)
 
 
-def create_frame_level_csv(
-    p_now: np.ndarray,
-    frame_hz: int = 50,
-    threshold: float = 0.5
-):
-    """
-    Create frame-by-frame CSV with all information.
-    
-    Args:
-        p_now: Next speaker probabilities
-        frame_hz: Frame rate
-        threshold: Threshold for predictions
-        
-    Returns:
-        DataFrame with frame-level information
-    """
-    times = np.arange(len(p_now)) / frame_hz
-    
-    df = pd.DataFrame({
-        'time': times,
-        'p_now': p_now,
-        'p_speaker_a': p_now,  # Probability Speaker A is next
-        'p_speaker_b': 1 - p_now,  # Probability Speaker B is next
-        'predicted_speaker': np.where(p_now > threshold, 'A', 'B'),
-        'confidence': np.abs(p_now - 0.5)  # Distance from 0.5
-    })
-    
-    # Add turn-taking interpretation
-    df['interpretation'] = df.apply(lambda row: 
-        'HOLD (A continues)' if row['p_now'] > threshold 
-        else 'SHIFT (B takes turn)', axis=1)
-    
-    return df
-
-
 def process_single_file(
     json_path: Path,
     output_path: Path,
@@ -168,24 +113,10 @@ def process_single_file(
     threshold: float = 0.5,
     min_turn_duration: float = 0.07,
     hysteresis: float = 0.1,
-    output_format: str = 'turns',
     verbose: bool = True
 ):
     """
-    Convert a single VAP JSON output to CSV format.
-    
-    Args:
-        json_path: Path to JSON file
-        output_path: Path to save CSV file
-        frame_hz: Frame rate of predictions
-        threshold: Threshold for turn predictions (default 0.5)
-        min_turn_duration: Minimum turn duration in seconds
-        hysteresis: Hysteresis margin for turn detection
-        output_format: 'turns' or 'frames'
-        verbose: Print detailed output
-        
-    Returns:
-        DataFrame with results
+    Converts a single VAP JSON output to CSV format.
     """
     try:
         # Load output
@@ -198,31 +129,20 @@ def process_single_file(
             print(f"\n📁 Processing: {json_path.name}")
             print(f"   Data: {len(p_now)} frames ({len(p_now)/frame_hz:.1f}s)")
         
-        if output_format == 'turns':
-            # Create turn-level CSV
-            df = extract_turns(
-                p_now=p_now,
-                frame_hz=frame_hz,
-                threshold=threshold,
-                min_turn_duration=min_turn_duration,
-                hysteresis=hysteresis
-            )
-            
-            if verbose:
-                print(f"   Extracted {len(df)} turns")
-                print(f"   - Speaker A: {(df['predicted_speaker'] == 'A').sum()}")
-                print(f"   - Speaker B: {(df['predicted_speaker'] == 'B').sum()}")
-            
-        else:  # frames
-            # Create frame-level CSV
-            df = create_frame_level_csv(
-                p_now=p_now,
-                frame_hz=frame_hz,
-                threshold=threshold
-            )
-            
-            if verbose:
-                print(f"   Created {len(df)} frames")
+
+        # Create turn-level CSV
+        df = extract_turns(
+            p_now=p_now,
+            frame_hz=frame_hz,
+            threshold=threshold,
+            min_turn_duration=min_turn_duration,
+            hysteresis=hysteresis
+        )
+        
+        if verbose:
+            print(f"   Extracted {len(df)} turns")
+            print(f"   - Speaker A: {(df['predicted_speaker'] == 'A').sum()}")
+            print(f"   - Speaker B: {(df['predicted_speaker'] == 'B').sum()}")
         
         # Save to CSV
         df.to_csv(output_path, index=False, float_format='%.4f')
@@ -243,21 +163,11 @@ def json_to_csv(
     frame_hz: int = 50,
     threshold: float = 0.5,
     min_turn_duration: float = 0.07,
-    hysteresis: float = 0.1,
-    output_format: str = 'turns'
+    hysteresis: float = 0.1
 ):
     """
     Convert VAP JSON output to CSV format.
     Handles both single files and directories.
-    
-    Args:
-        json_path: Path to JSON file or directory
-        output_path: Path to save CSV file or output directory
-        frame_hz: Frame rate of predictions
-        threshold: Threshold for turn predictions (default 0.5)
-        min_turn_duration: Minimum turn duration in seconds
-        hysteresis: Hysteresis margin for turn detection
-        output_format: 'turns' or 'frames'
     """
     json_path = Path(json_path)
     output_path = Path(output_path)
@@ -294,15 +204,13 @@ def json_to_csv(
                 threshold=threshold,
                 min_turn_duration=min_turn_duration,
                 hysteresis=hysteresis,
-                output_format=output_format,
                 verbose=False  # Suppress individual file output
             )
             
             if df is not None:
                 results.append({
                     'filename': json_file.name,
-                    'turns': len(df) if output_format == 'turns' else None,
-                    'frames': len(df) if output_format == 'frames' else None,
+                    'turns': len(df),
                     'output': csv_file.name
                 })
         
@@ -312,10 +220,9 @@ def json_to_csv(
         print("="*70)
         print(f"Successfully converted: {len(results)}/{len(json_files)} files")
         
-        if output_format == 'turns':
-            total_turns = sum(r['turns'] for r in results if r['turns'] is not None)
-            print(f"Total turns extracted: {total_turns}")
-            print(f"Average turns per file: {total_turns/len(results):.1f}")
+        total_turns = sum(r['turns'] for r in results if r['turns'] is not None)
+        print(f"Total turns extracted: {total_turns}")
+        print(f"Average turns per file: {total_turns/len(results):.1f}")
         
         print(f"\n✅ All CSV files saved to: {output_path}")
         
@@ -339,7 +246,6 @@ def json_to_csv(
             threshold=threshold,
             min_turn_duration=min_turn_duration,
             hysteresis=hysteresis,
-            output_format=output_format,
             verbose=True
         )
         
@@ -348,12 +254,11 @@ def json_to_csv(
             print("\n📊 Preview (first 5 rows):")
             print(df.head().to_string())
             
-            # Print summary statistics
-            if output_format == 'turns':
-                print("\n📈 Summary Statistics:")
-                print(f"  Total turns: {len(df)}")
-                print(f"  Average turn duration: {df['duration'].mean():.2f}s")
-                print(f"  Median confidence: {df['confidence'].median():.3f}")
+
+            print("\n📈 Summary Statistics:")
+            print(f"  Total turns: {len(df)}")
+            print(f"  Average turn duration: {df['duration'].mean():.2f}s")
+            print(f"  Median confidence: {df['confidence'].median():.3f}")
         
         return df
 
@@ -396,13 +301,6 @@ def get_args():
         default=0.07,
         help="Minimum turn duration in seconds (default: 0.07)"
     )
-    parser.add_argument(
-        "--format",
-        type=str,
-        choices=['turns', 'frames'],
-        default='turns',
-        help="Output format: 'turns' for turn-level analysis, 'frames' for frame-by-frame data"
-    )
     
     return parser.parse_args()
 
@@ -417,6 +315,5 @@ if __name__ == "__main__":
         frame_hz=args.frame_hz,
         threshold=args.threshold,
         min_turn_duration=args.min_duration,
-        hysteresis=args.hysteresis,
-        output_format=args.format
+        hysteresis=args.hysteresis
     )

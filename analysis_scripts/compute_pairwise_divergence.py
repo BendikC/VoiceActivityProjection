@@ -3,10 +3,6 @@ Compute Jensen-Shannon divergence between conversational pairs.
 
 Pairs up files with same task and delay but different speakers, computes
 JS divergence over time, and saves results as JSON.
-
-Usage:
-    python compute_pairwise_divergence.py --input_dir outputs/ --output_dir divergence_results/
-    python compute_pairwise_divergence.py --input_dir outputs/ --output divergence.json
 """
 
 import torch
@@ -24,15 +20,6 @@ from vap.utils import read_json
 def parse_filename(filename: str) -> Dict[str, str]:
     """
     Parse filename to extract metadata.
-    
-    Example: 01_S01_boat_d1500_conversation.json
-    Returns: {
-        'pair': '01',
-        'speaker': 'S01',
-        'task': 'boat',
-        'delay': 'd1500',
-        'delay_ms': 1500
-    }
     """
     name = Path(filename).stem
     
@@ -71,13 +58,6 @@ def get_speaker_pair(speaker: str) -> str:
 def find_conversation_pairs(input_dir: Path) -> List[Tuple[Path, Path, Dict]]:
     """
     Find all conversational pairs in directory.
-    
-    Args:
-        input_dir: Directory containing JSON files
-        
-    Returns:
-        List of tuples: (file1_path, file2_path, metadata)
-        where metadata contains shared task, delay, and pair info
     """
     # Find all JSON files
     json_files = list(input_dir.glob("*.json"))
@@ -163,14 +143,6 @@ def load_vap_output(json_path: str):
 def compute_kl_divergence(p: torch.Tensor, q: torch.Tensor, epsilon: float = 1e-10):
     """
     Compute KL divergence: KL(p || q) = sum(p * log2(p/q))
-    
-    Args:
-        p: Reference distribution (n_frames, n_classes)
-        q: Comparison distribution (n_frames, n_classes)
-        epsilon: Small value to avoid log(0)
-        
-    Returns:
-        torch.Tensor: KL divergence per frame
     """
     p = p + epsilon
     q = q + epsilon
@@ -186,16 +158,6 @@ def compute_js_divergence(p: torch.Tensor, q: torch.Tensor, epsilon: float = 1e-
     """
     Compute Jensen-Shannon divergence: JS(p, q) = 0.5 * KL(p||m) + 0.5 * KL(q||m)
     where m = 0.5 * (p + q)
-    
-    JS divergence is symmetric and bounded: [0, 1] bits
-    
-    Args:
-        p: First distribution (n_frames, n_classes)
-        q: Second distribution (n_frames, n_classes)
-        epsilon: Small value to avoid numerical issues
-        
-    Returns:
-        torch.Tensor: JS divergence per frame
     """
     p = p + epsilon
     q = q + epsilon
@@ -217,9 +179,6 @@ def compute_js_divergence(p: torch.Tensor, q: torch.Tensor, epsilon: float = 1e-
 def align_sequences(probs1: torch.Tensor, probs2: torch.Tensor):
     """
     Align two probability sequences to same length by truncating longer one.
-    
-    Returns:
-        tuple: (aligned_probs1, aligned_probs2)
     """
     min_frames = min(probs1.shape[1], probs2.shape[1])
     
@@ -238,12 +197,6 @@ def swap_speaker_channels(probs: torch.Tensor) -> torch.Tensor:
     
     To swap perspectives, we need to reorder the codebook so that
     what was "me" becomes "other" and vice versa.
-    
-    Args:
-        probs: (frames, 256) - probability distribution over 256 classes
-    
-    Returns:
-        probs_swapped: (frames, 256) - distribution with swapped perspective
     """
     device = probs.device
     
@@ -331,11 +284,6 @@ def process_dataset(
 ):
     """
     Process entire dataset and compute pairwise divergences.
-    
-    Args:
-        input_dir: Directory containing JSON files
-        output_path: Path to save results JSON (or directory for individual files)
-        frame_hz: Frame rate
     """
     input_dir = Path(input_dir)
     
